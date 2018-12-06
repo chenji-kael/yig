@@ -71,7 +71,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/internal/sdkio"
 	"github.com/aws/aws-sdk-go/private/protocol/rest"
 )
 
@@ -134,9 +133,7 @@ var requiredSignedHeaders = rules{
 			"X-Amz-Server-Side-Encryption-Customer-Key":                   struct{}{},
 			"X-Amz-Server-Side-Encryption-Customer-Key-Md5":               struct{}{},
 			"X-Amz-Storage-Class":                                         struct{}{},
-			"X-Amz-Tagging":					       struct{}{},
 			"X-Amz-Website-Redirect-Location":                             struct{}{},
-			"X-Amz-Content-Sha256":                                        struct{}{},
 		},
 	},
 	patterns{"X-Amz-Meta-"},
@@ -344,9 +341,7 @@ func (v4 Signer) signWithBody(r *http.Request, body io.ReadSeeker, service, regi
 
 	ctx.sanitizeHostForHeader()
 	ctx.assignAmzQueryValues()
-	if err := ctx.build(v4.DisableHeaderHoisting); err != nil {
-		return nil, err
-	}
+	ctx.build(v4.DisableHeaderHoisting)
 
 	// If the request is not presigned the body should be attached to it. This
 	// prevents the confusion of wanting to send a signed request without
@@ -508,13 +503,11 @@ func (v4 *Signer) logSigningInfo(ctx *signingCtx) {
 	v4.Logger.Log(msg)
 }
 
-func (ctx *signingCtx) build(disableHeaderHoisting bool) error {
+func (ctx *signingCtx) build(disableHeaderHoisting bool) {
 	ctx.buildTime()             // no depends
 	ctx.buildCredentialString() // no depends
 
-	if err := ctx.buildBodyDigest(); err != nil {
-		return err
-	}
+	ctx.buildBodyDigest()
 
 	unsignedHeaders := ctx.Request.Header
 	if ctx.isPresign {
@@ -542,8 +535,6 @@ func (ctx *signingCtx) build(disableHeaderHoisting bool) error {
 		}
 		ctx.Request.Header.Set("Authorization", strings.Join(parts, ", "))
 	}
-
-	return nil
 }
 
 func (ctx *signingCtx) buildTime() {
@@ -670,34 +661,21 @@ func (ctx *signingCtx) buildSignature() {
 	ctx.signature = hex.EncodeToString(signature)
 }
 
-func (ctx *signingCtx) buildBodyDigest() error {
+func (ctx *signingCtx) buildBodyDigest() {
 	hash := ctx.Request.Header.Get("X-Amz-Content-Sha256")
 	if hash == "" {
-		includeSHA256Header := ctx.unsignedPayload ||
-			ctx.ServiceName == "s3" ||
-			ctx.ServiceName == "glacier"
-
-		s3Presign := ctx.isPresign && ctx.ServiceName == "s3"
-
-		if ctx.unsignedPayload || s3Presign {
+		if ctx.unsignedPayload || (ctx.isPresign && ctx.ServiceName == "s3") {
 			hash = "UNSIGNED-PAYLOAD"
-			includeSHA256Header = !s3Presign
 		} else if ctx.Body == nil {
 			hash = emptyStringSHA256
 		} else {
-			if !aws.IsReaderSeekable(ctx.Body) {
-				return fmt.Errorf("cannot use unseekable request body %T, for signed request with body", ctx.Body)
-			}
 			hash = hex.EncodeToString(makeSha256Reader(ctx.Body))
 		}
-
-		if includeSHA256Header {
+		if ctx.unsignedPayload || ctx.ServiceName == "s3" || ctx.ServiceName == "glacier" {
 			ctx.Request.Header.Set("X-Amz-Content-Sha256", hash)
 		}
 	}
 	ctx.bodyDigest = hash
-
-	return nil
 }
 
 // isRequestSigned returns if the request is currently signed or presigned
@@ -737,18 +715,10 @@ func makeSha256(data []byte) []byte {
 
 func makeSha256Reader(reader io.ReadSeeker) []byte {
 	hash := sha256.New()
-	start, _ := reader.Seek(0, sdkio.SeekCurrent)
-	defer reader.Seek(start, sdkio.SeekStart)
+	start, _ := reader.Seek(0, 1)
+	defer reader.Seek(start, 0)
 
-	// Use CopyN to avoid allocating the 32KB buffer in io.Copy for bodies
-	// smaller than 32KB. Fall back to io.Copy if we fail to determine the size.
-	size, err := aws.SeekerLen(reader)
-	if err != nil {
-		io.Copy(hash, reader)
-	} else {
-		io.CopyN(hash, reader, size)
-	}
-
+	io.Copy(hash, reader)
 	return hash.Sum(nil)
 }
 
